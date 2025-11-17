@@ -42,6 +42,10 @@ else:
     SUFFIXES = ["bin", "bin64", "include", "lib", "lib64"]
     DEFAULT_SHELL = "sh"
 
+if os.getenv("EESSI_EPREFIX"):
+    EESSI_SYSTEM_PATHS = [os.path.join(os.getenv("EESSI_EPREFIX"), p) for p in ("", "usr", "usr/local")]
+    SYSTEM_PATHS = EESSI_SYSTEM_PATHS + SYSTEM_PATHS
+
 SYSTEM_DIRS = [os.path.join(p, s) for s in SUFFIXES for p in SYSTEM_PATHS] + SYSTEM_PATHS
 
 #: used in the compiler wrapper's ``/usr/lib|/usr/lib64|...)`` case entry
