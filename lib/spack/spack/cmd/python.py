@@ -40,7 +40,7 @@ def setup_parser(subparser: argparse.ArgumentParser) -> None:
         dest="python_interpreter",
         help="python interpreter",
         choices=["python", "ipython"],
-        default="python",
+        default="ipython",
     )
     subparser.add_argument(
         "-m", dest="module", action="store", help="run library module as a script"
