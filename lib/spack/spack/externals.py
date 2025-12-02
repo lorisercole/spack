@@ -17,7 +17,7 @@ into the intermediate representation.
 import re
 import uuid
 import warnings
-from typing import Any, Callable, Dict, List, NamedTuple, Tuple, Union
+from typing import Any, Callable, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from spack.vendor.typing_extensions import TypedDict
 
@@ -25,6 +25,7 @@ import spack.archspec
 import spack.deptypes
 import spack.repo
 import spack.spec
+import spack.util.spack_yaml as syaml
 from spack.error import SpackError
 from spack.llnl.util import tty
 
@@ -55,7 +56,7 @@ class ExternalDict(TypedDict, total=False):
 
 def node_from_dict(external_dict: ExternalDict) -> spack.spec.Spec:
     """Returns an external spec node from a dictionary representation."""
-    extra_attributes = external_dict.get("extra_attributes", {})
+    extra_attributes = syaml.sorted_dict(external_dict.get("extra_attributes", {}))
     result = spack.spec.Spec(
         # Allow `@x.y.z` instead of `@=x.y.z`
         str(spack.spec.parse_with_version_concrete(external_dict["spec"])),
@@ -186,6 +187,7 @@ class ExternalSpecsParser:
         *,
         complete_node: Callable[[spack.spec.Spec], None] = complete_variants_and_architecture,
         allow_nonexisting: bool = True,
+        node_factory: Optional[Callable[[ExternalDict], spack.spec.Spec]] = node_from_dict,
     ):
         """Initializes a class to manage and process external specifications in ``packages.yaml``.
 
@@ -194,12 +196,17 @@ class ExternalSpecsParser:
             complete_node: a callable that completes a node with missing variants, targets, etc.
                 Defaults to `complete_architecture`.
             allow_nonexisting: whether to allow non-existing packages. Defaults to True.
+            node_factory: a callable that creates a Spec from an ExternalDict. Defaults to `node_from_dict`.
 
         Raises:
             spack.repo.UnknownPackageError: if a package does not exist,
                 and allow_nonexisting is False.
         """
         self.external_dicts = external_dicts
+        if node_factory is None:
+            self.node_factory = node_from_dict
+        else:
+            self.node_factory = node_factory
         self.specs_by_external_id: Dict[str, ExternalSpecAndConfig] = {}
         self.specs_by_name: Dict[str, List[ExternalSpecAndConfig]] = {}
         self.nodes: List[spack.spec.Spec] = []
@@ -262,6 +269,7 @@ class ExternalSpecsParser:
                 if depflag == spack.deptypes.NONE and not virtuals:
                     # Infer the deptype if only '%' was used in the spec
                     inferred_virtuals = []
+                    tty.debug(f"'{current_node.name}': Inferring deptypes for '{dependency_node}' among {deptypes_by_package}")
                     for name, current_flag in deptypes_by_package.items():
                         if not dependency_node.intersects(name):
                             continue
@@ -269,6 +277,12 @@ class ExternalSpecsParser:
                         if spack.repo.PATH.is_virtual(name):
                             inferred_virtuals.append(name)
                     virtuals = tuple(inferred_virtuals)
+                    # If we could not infer anything, use DEFAULT - this is the case where a dependency is unknown to Spack's package
+                    if depflag == spack.deptypes.NONE:
+                        depflag = spack.deptypes.DEFAULT
+                        tty.debug(f"'{current_node.name}': COULD NOT INFER DEPTYPES for '{dependency_node}', using DEFAULT")
+                    else:
+                        tty.debug(f"'{current_node.name}': INFERRED DEPTYPES {depflag} and virtuals {virtuals} for '{dependency_node}'")
                 elif depflag == spack.deptypes.NONE:
                     depflag = spack.deptypes.DEFAULT
 
@@ -338,7 +352,7 @@ class ExternalSpecsParser:
         for external_dict in self.external_dicts:
             line_info = _line_info(external_dict)
             try:
-                node = node_from_dict(external_dict)
+                node = self.node_factory(external_dict)  # Use injected function
             except spack.spec.UnsatisfiableArchitectureSpecError:
                 spec_str, target_str = external_dict["spec"], external_dict["required_target"]
                 tty.debug(
@@ -370,25 +384,86 @@ class ExternalSpecsParser:
 
             self.complete_node(node)
 
-            # Add a Python dependency to Python extensions that don't specify it
-            pkg_class = spack.repo.PATH.get_pkg_class(node.name)
-            if (
-                "dependencies" not in external_dict
-                and not node.dependencies()
-                and any([c.__name__ == "PythonExtension" for c in pkg_class.__mro__])
-            ):
-                warnings.warn(
-                    f"Spack is trying attach a Python dependency to '{node}'. This feature is "
-                    f"deprecated, and will be removed in v1.2. Please make the dependency "
-                    f"explicit in your configuration."
-                )
-                external_dict.setdefault("dependencies", []).append({"spec": "python"})
+            inject_python_dependency(node, external_dict)
 
             # Normalize internally so that each node has a unique id
             spec_and_config = ExternalSpecAndConfig(spec=node, config=external_dict)
             self.specs_by_external_id[eid] = spec_and_config
             self.specs_by_name.setdefault(node.name, []).append(spec_and_config)
             self.nodes.append(node)
+    
+    def inject_python_dependency(node: spack.spec.Spec, external_dict: ExternalDict) -> None:
+        """Add a Python dependency to Python extensions that don't specify it."""
+        pkg_class = spack.repo.PATH.get_pkg_class(node.name)
+        if (
+            "dependencies" not in external_dict
+            and not node.dependencies()
+            and any([c.__name__ == "PythonExtension" for c in pkg_class.__mro__])
+        ):
+            warnings.warn(
+                f"Spack is trying attach a Python dependency to '{node}'. This feature is "
+                f"deprecated, and will be removed in v1.2. Please make the dependency "
+                f"explicit in your configuration."
+            )
+            external_dict.setdefault("dependencies", []).append({"spec": "python"})
+
+    def inject_runtime_libs(node: spack.spec.Spec, external_dict: ExternalDict) -> None:
+        """
+        Add a libc dependency to nodes that specify a compiler as build dependency.
+        Add a gcc-runtime or intel-oneapi-runtime dependency to nodes built with gcc or intel-oneapi-compilers.
+        """
+        # TODO...
+        # # add libc as a dependency to all specs built with a compiler, and to gcc-runtime
+        # for specconf in self.config.specs:
+        #     if specconf.compiler or specconf.name == "gcc-runtime":
+        #         specconf.dependencies.append(
+        #             models.DependencyConfig(
+        #                 name=libc_config.spec_map_key,
+        #                 depflags=["LINK"],
+        #                 virtuals=["libc"],
+        #             )
+        #         )
+        #         logger.debug(f"Added libc dependency to spec: {specconf.spec_map_key}")
+
+        # # add gcc-runtime to config if gcc is defined. It has the compiler and glibc as dependencies
+        # # it uses the architecture of the host
+        # for specconf in self.config.specs:
+        #     if specconf.name == "gcc":
+        #         self.config.specs.append(
+        #             models.SpecConfig(
+        #                 name="gcc-runtime",
+        #                 version=specconf.version,
+        #                 external_path=specconf.external_path,
+        #                 external_modules=specconf.external_modules,
+        #                 architecture=self.host_arch_config,
+        #                 dependencies=[
+        #                     models.DependencyConfig(name=specconf.spec_map_key, depflags=["BUILD"]),  # compiler
+        #                     models.DependencyConfig(name=libc_config.spec_map_key, depflags=["LINK"], virtuals=["libc"])
+        #                 ],
+        #             )
+        #         )
+        #         logger.debug(f"Added gcc-runtime for compiler spec: {specconf.spec_map_key}")
+        #     elif specconf.name in NOT_IMPLEMENTED_COMPILERS:
+        #         raise NotImplementedError(f"{specconf.name} runtime injection not implemented.")
+
+        # # add gcc-runtime as dependency to all specs built with gcc
+        # for specconf in self.config.specs:
+        #     if specconf.compiler:
+        #         match = re.match(r"^(?P<name>[\w\-]+)@(?P<version>[\w\.\-]+)$", specconf.compiler)
+        #         if match:
+        #             compiler_version = match.group("version")
+        #             if match.group("name") == "gcc":
+        #                 specconf.dependencies.append(
+        #                     models.DependencyConfig(
+        #                         name=f"gcc-runtime@{compiler_version}",
+        #                         depflags=["LINK"]
+        #                     )
+        #                 )
+        #                 logger.debug(f"Added gcc-runtime dependency to spec: {specconf.spec_map_key}")
+        #             else:
+        #                 raise NotImplementedError(f"Compiler of spec: {specconf.spec_map_key} is not gcc.")
+        #         else:
+        #             raise ValidationError(f"Invalid compiler format: {specconf.compiler}")
 
     def get_specs_for_package(self, package_name: str) -> List[spack.spec.Spec]:
         """Returns the external specs for a given package name."""

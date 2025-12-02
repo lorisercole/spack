@@ -3,7 +3,7 @@
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 import enum
 import functools
-from typing import Any, Callable, List, Mapping, Tuple
+from typing import Any, Callable, List, Mapping, Optional, Tuple
 
 import spack.binary_distribution
 import spack.config
@@ -14,6 +14,7 @@ import spack.spec
 import spack.store
 import spack.traverse
 from spack.externals import (
+    ExternalDict,
     ExternalSpecsParser,
     complete_architecture,
     complete_variants_and_architecture,
@@ -107,6 +108,14 @@ class SpecFilter:
     def from_packages_yaml(configuration, *, include, exclude) -> "SpecFilter":
         parser, packages_yaml = _create_external_parser(configuration)
         is_reusable = functools.partial(_is_reusable, packages=packages_yaml, local=True)
+        return SpecFilter(
+            parser.all_specs, is_usable=is_reusable, include=include, exclude=exclude
+        )
+
+    @staticmethod
+    def from_external_yaml(configuration, external_yaml, *, include, exclude, node_factory=None) -> "SpecFilter":
+        parser, packages_yaml = _create_external_parser(configuration, external_yaml=external_yaml, node_factory=node_factory)
+        is_reusable = lambda spec: True  # assume all externals are reusable
         return SpecFilter(
             parser.all_specs, is_usable=is_reusable, include=include, exclude=exclude
         )
@@ -214,8 +223,11 @@ class ReuseStrategy(enum.Enum):
 
 def _create_external_parser(
     configuration: spack.config.Configuration,
+    *,
+    external_yaml: Optional[str] = None,
+    node_factory: Optional[Callable[[ExternalDict], spack.spec.Spec]] = None,
 ) -> Tuple[ExternalSpecsParser, Any]:
-    packages_yaml = external_config_with_implicit_externals(configuration)
+    packages_yaml = external_config_with_implicit_externals(configuration, external_yaml=external_yaml)
     external_dicts = extract_dicts_from_configuration(packages_yaml)
     result = configuration.get("concretizer:externals:completion")
     if result == "default_variants":
@@ -224,7 +236,8 @@ def _create_external_parser(
         complete_fn = complete_architecture
     else:
         raise ValueError(f"Unknown value for concretizer:externals:completion: {result!r}")
-    return ExternalSpecsParser(external_dicts, complete_node=complete_fn), packages_yaml
+    return ExternalSpecsParser(external_dicts, complete_node=complete_fn, node_factory=node_factory), packages_yaml
+
 
 
 class ReusableSpecsSelector:

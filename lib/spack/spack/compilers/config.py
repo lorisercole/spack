@@ -153,6 +153,17 @@ def all_compilers_from(
     compilers = CompilerFactory.from_packages_yaml(configuration, scope=scope)
     return compilers
 
+def all_compilers_from_dict(
+    packages_dict: Dict[str, Any]
+) -> List[spack.spec.Spec]:
+    """Returns all the compilers from a packages dictionary.
+
+    Args:
+        packages_dict: dictionary corresponding to a "packages" section of a Spack configuration
+    """
+    compilers = CompilerFactory.from_packages_dict(packages_dict)
+    return compilers
+
 
 class CompilerRemover:
     """Removes compiler from configuration."""
@@ -253,6 +264,32 @@ def name_os_target(spec: spack.spec.Spec) -> Tuple[str, str, str]:
 
 class CompilerFactory:
     """Class aggregating all ways of constructing a list of compiler specs from config entries."""
+
+    @staticmethod
+    def from_packages_dict(packages_dict: Dict[str, Any]) -> List[spack.spec.Spec]:
+        """Returns the compiler specs defined in the "packages" dictionary"""
+        externals_dicts = []
+        compiler_package_names = supported_compilers()
+        for name, entry in packages_dict.items():
+            if name not in compiler_package_names:
+                continue
+
+            externals_config = entry.get("externals", None)
+            if not externals_config:
+                continue
+
+            for current in externals_config:
+                # If extra_attributes is not there don't use this entry as a compiler.
+                if _EXTRA_ATTRIBUTES_KEY not in current:
+                    header = f"The external spec '{current['spec']}' cannot be used as a compiler"
+                    tty.debug(f"[{__file__}] {header}: missing the '{_EXTRA_ATTRIBUTES_KEY}' key")
+                    continue
+
+                externals_dicts.append(current)
+
+        external_parser = ExternalSpecsParser(externals_dicts)
+        return external_parser.all_specs(
+    )
 
     @staticmethod
     def from_packages_yaml(

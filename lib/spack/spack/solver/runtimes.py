@@ -2,7 +2,7 @@
 #
 # SPDX-License-Identifier: (Apache-2.0 OR MIT)
 import itertools
-from typing import Any, Dict, Set, Tuple
+from typing import Any, Dict, Optional, Set, Tuple
 
 import spack.compilers.config
 import spack.compilers.libraries
@@ -10,6 +10,7 @@ import spack.config
 import spack.repo
 import spack.spec
 import spack.util.libc
+import spack.util.spack_yaml as syaml
 import spack.version
 
 from .core import SourceContext, fn, using_libc_compatibility
@@ -283,10 +284,16 @@ def _normalize_packages_yaml(packages_yaml: Dict[str, Any]) -> None:
 
 def external_config_with_implicit_externals(
     configuration: spack.config.Configuration,
+    *,
+    external_yaml: Optional[str] = None,
 ) -> Dict[str, Any]:
     # Read packages.yaml and normalize it so that it will not contain entries referring to
     # virtual packages.
-    packages_yaml = configuration.deepcopy_as_builtin("packages", line_info=True)
+    if external_yaml:
+        with open(external_yaml, "r") as f:
+            packages_yaml = syaml.load_config(f)["packages"]
+    else:
+        packages_yaml = configuration.deepcopy_as_builtin("packages", line_info=True)
     _normalize_packages_yaml(packages_yaml)
 
     # Add externals for libc from compilers on Linux
@@ -294,7 +301,11 @@ def external_config_with_implicit_externals(
         return packages_yaml
 
     seen = set()
-    for compiler in spack.compilers.config.all_compilers_from(configuration):
+    if external_yaml:
+        all_compilers = spack.compilers.config.all_compilers_from_dict(packages_yaml)
+    else:
+        all_compilers = spack.compilers.config.all_compilers_from(configuration)
+    for compiler in all_compilers:
         libc = spack.compilers.libraries.CompilerPropertyDetector(compiler).default_libc()
         if libc and libc not in seen:
             seen.add(libc)
